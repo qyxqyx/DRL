@@ -1,3 +1,10 @@
+"""
+Double DQN
+
+Using:
+mxnet 0.11.0
+"""
+
 import numpy as np
 import mxnet as mx
 
@@ -39,15 +46,16 @@ class double_DQN(object):
                 fc1 = mx.sym.FullyConnected(data=ac1, num_hidden=num, name='fc'+str(i+1))
                 ac1 = mx.sym.Activation(data=fc1, act_type='relu', name='ac'+str(i+1))
 
+        # 输入state，输出当前state下可选择的所有action的q值（Q(s, a_all)）.
         q_value = mx.sym.FullyConnected(data=ac1, num_hidden=self.actions_num, name='q_value')
 
 
         if for_train == True:
+            # action是一个one——hot的array，共有batch_size行，每一行表示实际选择的action的序号
             action = mx.sym.Variable('action')
+            # batch_size个q_target，用来作为Q(s, a)的label
             q_target = mx.sym.Variable('q_target')
 
-            # q_predict = mx.sym.dot(q_value,  action)
-            # action = mx.sym.one_hot(action,self.actions_num)
             q_predict = q_value * action
             q_predict = mx.sym.sum(data=q_predict, axis=1)
             td_error = q_target - q_predict
@@ -92,12 +100,11 @@ class double_DQN(object):
         s = s[np.newaxis, :]
         a = np.array(np.zeros(shape=(1, self.actions_num)))
         q_target = np.array([1])
-        #a = mx.nd.array(a)
+
         self.eval.forward(mx.io.DataBatch(data=[mx.nd.array(s,self.ctx)],
                                           label=[mx.nd.array(a,self.ctx), mx.nd.array(q_target,self.ctx)]), is_train=False)
         actions = self.eval.get_outputs()[0].asnumpy()[0]
         action_index = np.argmax(actions)
-
 
         if np.random.uniform() > self.epsilon:
             action_index = np.random.randint(0, self.actions_num)
@@ -105,15 +112,16 @@ class double_DQN(object):
 
 
     def learn(self):
-        # hard replace parameters
+        # soft replace parameters
         new_params, _ = self.eval.get_params()
         old_params, _ = self.target.get_params()
-        #print(new_params)
+
         for key in new_params:
             old_params[key] = old_params[key] * self.beta + new_params[key] * (1-self.beta)
 
         self.target.init_params(initializer=None, arg_params=old_params, force_init=True)
 
+        # 从memory中随机抽取batch_size个(s, r, a, s_)
         index = np.random.choice(self.memory_size, size=self.batch_size)
         batch_sample = self.memory[index, :]
 
@@ -122,51 +130,40 @@ class double_DQN(object):
         batch_reward = batch_sample[:, -self.state_dim - 1: -self.state_dim]
         batch_state_next = batch_sample[:, -self.state_dim:]
 
-        # 将s_next输入actor_target网络，得出a_next
-        # state_date = mx.io.DataBatch([mx.nd.array(batch_state, ctx=self.ctx)])
-
+        # 首先得到Q_predict(s_next, a_all), 求出使Q_predict(s_next, a)最大的a
         a = np.array(np.zeros(shape=(self.batch_size, self.actions_num)))
         q_target_temp = np.array(np.zeros(shape=(self.batch_size,)))
-
         state_next_date = mx.io.DataBatch(data=[mx.nd.array(batch_state_next,self.ctx)],
                                           label=[mx.nd.array(a,self.ctx), mx.nd.array(q_target_temp,self.ctx)])
         self.eval.forward(state_next_date,is_train=False)
         q_next_eval = self.eval.get_outputs()[0].asnumpy()
         action_next = np.argmax(q_next_eval, axis=1)
 
-        # 将s_next与a_next一起输入critic_target网络，得出q(s_next,a_next)
+        # 首先得到Q_target(s_next, a_all)
         data1 = mx.io.DataBatch(data=[mx.nd.array(batch_state_next, ctx=self.ctx)])
         self.target.forward(data1, is_train=False)
         q_next_target = self.target.get_outputs()[0].asnumpy()
-        #print(q_next_target.shape)
+
+        # 根据使用eval网络求出的a，得出q_target
         q_target = np.array(np.zeros(shape=(32, 1)))
         (m, n) = q_next_target.shape
         for i in range(m):
             q_target[i] = q_next_target[i][action_next[i]]
-        #q_target = q_next_target[action_next]
         q_target = self.gamma*q_target + batch_reward
         q_target = q_target.reshape(self.batch_size, )
 
+
+        # 将action、state、q_target输入eval网络，训练eval网络
         temp = np.zeros(shape=(self.batch_size, self.actions_num))
         for i, j in enumerate(batch_action):
             j = int(j)
             temp[i, j] = 1
-        # print(batch_action)
-        # batch_action = batch_action.reshape(self.batch_size, )
-        # print(batch_action)
         data2 = mx.io.DataBatch(data=[mx.nd.array(batch_state, ctx=self.ctx)],
                                label=[mx.nd.array(temp, ctx=self.ctx), mx.nd.array(q_target, ctx=self.ctx)])
         self.eval.forward(data2, is_train=True)
         a,b= self.eval.get_outputs()
-
         self.eval.backward()
         self.eval.update()
-        # diff = self.critic_eval.get_input_grads()[1]
-        # diff = diff/(2 * mx.nd.array(c, self.ctx))
-        # diff = [-diff]
-        #
-        # self.actor_eval.backward(diff)
-        # self.actor_eval.update()
 
         return a, b
 
