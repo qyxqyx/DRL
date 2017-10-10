@@ -16,10 +16,10 @@ import gym
 import matplotlib.pyplot as plt
 import mxnet as mx
 
-MAX_GLOBAL_EP = 1000
-UPDATE_GLOBAL_ITER = 10
-GLOBAL_RUNNING_R = []
-GLOBAL_EP = 0
+MAX_GLOBAL_EP = 1000          #number of episodes
+UPDATE_GLOBAL_ITER = 10       #the number of steps in a period that the local agent update global net params
+GLOBAL_RUNNING_R = []         #the list used to store all rewards in every episode
+GLOBAL_EP = 0                 #a episode counter
 
 thread_lock = threading.Lock()
 
@@ -28,15 +28,15 @@ class A3C_GLOBAL(object):
     def __init__(self, batch_size, state_dim, actions_num, actor_lr, critic_lr, ctx):
         self.batch_size  = batch_size
         self.state_dim   = state_dim
-        self.actions_num = actions_num
+        self.actions_num = actions_num     #scale of action space
         self.actor_lr    = actor_lr
         self.critic_lr   = critic_lr
         self.ctx         = ctx
 
         self.state = mx.sym.Variable('state')
 
-        self.action_prob = self._actor_mod()
-        self.v_current   = self._critic_mod()
+        self.action_prob = self._actor_mod()       #define the action_prob module
+        self.v_current   = self._critic_mod()      #define the value function module
 
         self.actor_params, _  = self.action_prob.get_params()
         self.ctitic_params, _ = self.v_current.get_params()
@@ -93,26 +93,26 @@ class A3C_WORKER(object):
     def __init__(self, global_mod, worker_index, actions_num, state_dim,
                  entropy_weight, actor_lr, critic_lr, batch_size, gamma, ctx):
 
-        self.global_mod  = global_mod
-        self.worker_index= worker_index
+        self.global_mod  = global_mod             #the global net
+        self.worker_index= worker_index           #the index of the current agent
         self.gamma       = gamma
-        self.entropy_weight = entropy_weight
+        self.entropy_weight = entropy_weight      #entropy is used to encourage exploration
         self.actor_lr    = actor_lr
         self.critic_lr   = critic_lr
         self.state_dim   = state_dim
-        self.actions_num = actions_num
+        self.actions_num = actions_num            #scale of action space
         self.batch_size  = batch_size
         self.ctx         = ctx
 
 
-        self.action_prob = self._actor_mod()
-        self.v_current= self._critic_mod()
+        self.action_prob = self._actor_mod()      # define the action_prob module
+        self.v_current= self._critic_mod()        # define the value function module
 
         self.actor_params, _ = self.action_prob.get_params()
         self.ctitic_params, _ = self.v_current.get_params()
 
-        self.actor_loss = self._actor_loss_mod()
-        self.critic_loss = self._critic_loss_mod()
+        self.actor_loss = self._actor_loss_mod()  # define the actor_loss module
+        self.critic_loss = self._critic_loss_mod()# define the critic_loss module
 
 
 
@@ -229,6 +229,7 @@ class A3C_WORKER(object):
         return critic_loss
 
 
+    # predict the value of the next state, return v(s_next)
     def get_v_next(self, batch_state_next):
         critic_data = mx.io.DataBatch(data=[mx.nd.array(batch_state_next,self.ctx)], label=None)
         self.v_current.forward(data_batch=critic_data, is_train=None)
@@ -239,14 +240,17 @@ class A3C_WORKER(object):
     def update_global(self, batch_state, batch_v_next, batch_reward, batch_action_one_hot):
         global thread_lock
 
+        # get action_probability distribution
         actor_data = mx.io.DataBatch(data=[mx.nd.array(batch_state,self.ctx)], label=None)
         self.action_prob.forward(data_batch=actor_data,is_train=False)
         batch_action_prob = self.action_prob.get_outputs()[0]
 
+        # get the value of the current state: v(s_current)
         critic_data = mx.io.DataBatch(data=[mx.nd.array(batch_state,self.ctx)], label=None)
         self.v_current.forward(data_batch=critic_data, is_train=None)
         batch_v_current = self.v_current.get_outputs()[0]
 
+        # input v(s_current) v(s_next) reward to critic_loss module, get td_error and the gradient of v(s_current)
         critic_loss_data = mx.io.DataBatch(data=[mx.nd.array(batch_v_current,self.ctx)],
                                            label=[mx.nd.array(batch_v_next,self.ctx),
                                                   mx.nd.array(batch_reward, self.ctx)])
@@ -257,6 +261,7 @@ class A3C_WORKER(object):
         self.critic_loss.backward()
         critic_grad = self.critic_loss.get_input_grads()[0]
 
+        # according to the action_prob and the td_error to calculate the actor_loss, and get the gradient of action_prob
         actor_loss_data = mx.io.DataBatch(data=[mx.nd.array(batch_action_prob,self.ctx)],
                                           label=[mx.nd.array(batch_action_one_hot,self.ctx),
                                                  mx.nd.array(batch_td_error, self.ctx)])
@@ -265,6 +270,7 @@ class A3C_WORKER(object):
         self.actor_loss.backward()
         actor_grad = self.actor_loss.get_input_grads()[0]
 
+        # use the two gradients which were calculated before to update the global net's params
         thread_lock.acquire()
         self.global_mod.action_prob.forward(data_batch=actor_data, is_train=True)
         self.global_mod.action_prob.backward([actor_grad])
@@ -276,7 +282,7 @@ class A3C_WORKER(object):
 
         return batch_td_error, actor_loss.asnumpy()
 
-
+    # get the global net's params, and assign the params to local agent net
     def pull_global(self):
         global thread_lock
 
@@ -296,7 +302,7 @@ class A3C_WORKER(object):
         self.action_prob.init_params(initializer=None,arg_params=actor_params,force_init=True)
         self.v_current.init_params(initializer=None, arg_params=critic_params, force_init=True)
 
-
+    # according state to get action probabilities and sample from these actions
     def choose_action(self, state):
         state = state[np.newaxis, :]
         action_data = mx.io.DataBatch(data=[mx.nd.array(state,self.ctx)], label=None)
@@ -333,8 +339,8 @@ class Worker(object):
                 s_, r, done, info = self.env.step(a)
                 if done: r = -20
                 ep_r += r
-                buffer_s.append(s)
-                buffer_a.append(a)
+                buffer_s.append(s)          # store state to the buffer
+                buffer_a.append(a)          # store action to the buffer
                 buffer_r.append(r)
 
 
@@ -362,6 +368,7 @@ class Worker(object):
                     for i in range(buffer_a.shape[0]):
                         action_one_hot[i][buffer_a[i]] = 1
 
+                    # update the global net's params
                     td_error, actor_loss  = self.AC.update_global(batch_state=buffer_s,
                                                                   batch_action_one_hot=action_one_hot,
                                                                   batch_reward=buffer_r,
@@ -408,11 +415,11 @@ if __name__ == "__main__":
     ctx            = mx.cpu(0)
     number_workers = 8
 
-
+    # create a global net
     global_mod = A3C_GLOBAL(batch_size, state_dim, actions_num, actor_lr, critic_lr, ctx)
 
     workers = []
-    # Create worker
+    # Create n agents
     for i in range(number_workers):
         worker_name = 'Worker_%i' % i   # worker name
         worker_mod = A3C_WORKER(global_mod, i, actions_num, state_dim,entropy_weight,
@@ -420,12 +427,14 @@ if __name__ == "__main__":
         workers.append(Worker(env_name, worker_name, worker_mod, gamma, 100, 200))
 
     worker_threads = []
+    # let these agents to work
     for worker in workers:
         job = lambda: worker.work()
         t = threading.Thread(target=job)
         t.start()
         worker_threads.append(t)
 
+    # wait all agents to finish their work
     for worker_thread in worker_threads:
         worker_thread.join()
 
