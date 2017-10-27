@@ -10,7 +10,7 @@ gym 0.8.0
 import numpy as np
 import gym
 import mxnet as mx
-from dqn import double_DQN
+from double_dqn import double_DQN
 from pylab import *
 
 
